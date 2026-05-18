@@ -114,6 +114,25 @@ function computeRawTotals(array $summaryRows): array
     return $totals;
 }
 
+function distributeExtraExpensesEvenly(float $total, int $count): array
+{
+    if ($count <= 0) {
+        return [];
+    }
+
+    $totalCents = (int) round($total * 100);
+    $base = (int) floor($totalCents / $count);
+    $remainder = $totalCents - ($base * $count);
+    $result = [];
+
+    for ($index = 0; $index < $count; $index++) {
+        $cents = $base + ($index < $remainder ? 1 : 0);
+        $result[] = $cents / 100;
+    }
+
+    return $result;
+}
+
 function metricValueFromRaw(array $raw, string $metric): float
 {
     $impressions = parseNumericValue($raw['impressions'] ?? 0);
@@ -136,7 +155,7 @@ function metricValueFromRaw(array $raw, string $metric): float
         'ctr' => $impressions > 0 ? ($views / $impressions) * 100 : 0.0,
         'cr1' => $views > 0 ? ($contacts / $views) * 100 : 0.0,
         'cr2' => $contacts > 0 ? ($salesCount / $contacts) * 100 : 0.0,
-        'cpl' => $contacts > 0 ? ($adSpend / $contacts) : 0.0,
+        'cpl' => $contacts > 0 ? ($totalExpenses / $contacts) : 0.0,
         'cpo' => $salesCount > 0 ? ($adSpend / $salesCount) : 0.0,
         'roi' => $totalExpenses > 0 ? (($revenue - $totalExpenses) / $totalExpenses) * 100 : 0.0,
         'roas' => $adSpend > 0 ? ($revenue / $adSpend) : 0.0,
@@ -594,7 +613,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $adSpend = $_POST['ad_spend'] ?? [];
             $salesCount = $_POST['sales_count'] ?? [];
             $revenue = $_POST['revenue'] ?? [];
-            $extraExpenses = $_POST['extra_expenses'] ?? [];
+            $extraExpensesTotal = parseNumericValue($_POST['extra_expenses_total'] ?? 0);
 
             if ($cityLabel === '') {
                 throw new RuntimeException('Укажите город.');
@@ -625,6 +644,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($summaryRows === []) {
                 throw new RuntimeException('В срезе не осталось строк для сохранения.');
+            }
+
+            $distributedExtraExpenses = distributeExtraExpensesEvenly($extraExpensesTotal, count($summaryRows));
+
+            foreach ($summaryRows as $index => $summaryRow) {
+                $summaryRows[$index]['extra_expenses'] = $distributedExtraExpenses[$index] ?? 0.0;
             }
 
             $newFileName = buildSliceFileName($cityLabel, $periodFrom, $periodTo);
@@ -989,6 +1014,11 @@ if ($editFile !== '') {
             font: inherit;
         }
 
+        .summary-edit-table input[readonly] {
+            background: #f3f7fa;
+            color: var(--muted);
+        }
+
         .summary-edit-total td {
             font-weight: 700;
             background: rgba(13, 108, 143, 0.08);
@@ -1145,7 +1175,7 @@ if ($editFile !== '') {
         <section class="panel">
             <h2>Редактирование среза</h2>
             <p class="small">
-                В форме ниже показана вся сводка. Базовые поля редактируются, а расчетные метрики пересчитываются сразу при изменении значений.
+                В форме ниже показана вся сводка. Базовые поля редактируются, а дополнительные расходы задаются одной общей суммой внизу и автоматически распределяются по строкам.
             </p>
             <form method="post">
                 <input type="hidden" name="action" value="save_edit">
@@ -1210,7 +1240,7 @@ if ($editFile !== '') {
                                 <td data-edit-field="roi"><?= h(formatMetricValue(metricValueFromRaw($row, 'roi'), 'roi')) ?></td>
                                 <td data-edit-field="roas"><?= h(formatMetricValue(metricValueFromRaw($row, 'roas'), 'roas')) ?></td>
                                 <td><input type="number" min="0" step="0.01" name="ad_spend[]" data-edit-manual="ad_spend" value="<?= h((string) ($row['ad_spend'] ?? 0)) ?>"></td>
-                                <td><input type="number" min="0" step="0.01" name="extra_expenses[]" value="<?= h((string) ($row['extra_expenses'] ?? 0)) ?>"></td>
+                                <td><input type="number" min="0" step="0.01" name="extra_expenses[]" value="<?= h((string) ($row['extra_expenses'] ?? 0)) ?>" readonly></td>
                             </tr>
                         <?php endforeach; ?>
                         <tr class="summary-edit-total">
@@ -1228,7 +1258,7 @@ if ($editFile !== '') {
                             <td data-edit-total="roi"></td>
                             <td data-edit-total="roas"></td>
                             <td data-edit-total="ad_spend"></td>
-                            <td data-edit-total="extra_expenses"></td>
+                            <td><input type="number" min="0" step="0.01" name="extra_expenses_total" value="<?= h((string) parseNumericValue($editSlice['totals']['extra_expenses'] ?? 0)) ?>"></td>
                         </tr>
                         </tbody>
                     </table>
@@ -1378,12 +1408,32 @@ document.addEventListener('DOMContentLoaded', function () {
         return formatMoney(sum / count);
     }
 
+    function distributeExtraExpenses(total, count) {
+        if (!Number.isFinite(total) || count <= 0) {
+            return [];
+        }
+
+        const totalCents = Math.round(total * 100);
+        const base = Math.floor(totalCents / count);
+        const remainder = totalCents - (base * count);
+        const values = [];
+
+        for (let index = 0; index < count; index += 1) {
+            const cents = base + (index < remainder ? 1 : 0);
+            values.push(cents / 100);
+        }
+
+        return values;
+    }
+
     function recalculateEditSummary() {
         if (!editSummaryTable) {
             return;
         }
 
         const rows = Array.from(editSummaryTable.querySelectorAll('tbody tr.edit-summary-row'));
+        const totalExtraExpenses = parseNumber(editSummaryTable.querySelector('[name="extra_expenses_total"]')?.value);
+        const distributedExtraExpenses = distributeExtraExpenses(totalExtraExpenses, rows.length);
         const totals = {
             impressions: 0,
             views: 0,
@@ -1394,17 +1444,22 @@ document.addEventListener('DOMContentLoaded', function () {
             extra_expenses: 0
         };
 
-        rows.forEach(function (row) {
+        rows.forEach(function (row, index) {
             const impressions = parseNumber(row.querySelector('[name="impressions[]"]')?.value);
             const views = parseNumber(row.querySelector('[name="views[]"]')?.value);
             const contacts = parseNumber(row.querySelector('[name="contacts[]"]')?.value);
             const salesCount = parseNumber(row.querySelector('[name="sales_count[]"]')?.value);
             const revenue = parseNumber(row.querySelector('[name="revenue[]"]')?.value);
             const adSpend = parseNumber(row.querySelector('[name="ad_spend[]"]')?.value);
-            const extraExpenses = parseNumber(row.querySelector('[name="extra_expenses[]"]')?.value);
+            const extraExpenses = distributedExtraExpenses[index] || 0;
             const totalExpenses = adSpend + extraExpenses;
             const roi = totalExpenses > 0 ? ((revenue - totalExpenses) / totalExpenses) * 100 : NaN;
             const roas = adSpend > 0 ? revenue / adSpend : NaN;
+            const extraExpensesInput = row.querySelector('[name="extra_expenses[]"]');
+
+            if (extraExpensesInput instanceof HTMLInputElement) {
+                extraExpensesInput.value = extraExpenses > 0 ? extraExpenses.toFixed(2) : '0';
+            }
 
             totals.impressions += impressions;
             totals.views += views;
@@ -1417,7 +1472,7 @@ document.addEventListener('DOMContentLoaded', function () {
             const values = {
                 ctr: ratioPercent(views, impressions),
                 cr1: ratioPercent(contacts, views),
-                cpl: unitCost(adSpend, contacts),
+                cpl: unitCost(adSpend + extraExpenses, contacts),
                 cr2: ratioPercent(salesCount, contacts),
                 cpo: unitCost(adSpend, salesCount),
                 roi: Number.isFinite(roi) ? formatPercent(roi) : 'н/д',
@@ -1438,7 +1493,7 @@ document.addEventListener('DOMContentLoaded', function () {
             views: formatInteger(totals.views),
             cr1: ratioPercent(totals.contacts, totals.views),
             contacts: formatInteger(totals.contacts),
-            cpl: unitCost(totals.ad_spend, totals.contacts),
+            cpl: unitCost(totals.ad_spend + totals.extra_expenses, totals.contacts),
             cr2: ratioPercent(totals.sales_count, totals.contacts),
             sales_count: formatInteger(totals.sales_count),
             cpo: unitCost(totals.ad_spend, totals.sales_count),

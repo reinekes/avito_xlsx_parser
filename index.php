@@ -882,6 +882,25 @@ function computeSliceTotals(array $summaryRows): array
     return $totals;
 }
 
+function distributeExtraExpensesEvenly(float $total, int $count): array
+{
+    if ($count <= 0) {
+        return [];
+    }
+
+    $totalCents = (int) round($total * 100);
+    $base = (int) floor($totalCents / $count);
+    $remainder = $totalCents - ($base * $count);
+    $result = [];
+
+    for ($index = 0; $index < $count; $index++) {
+        $cents = $base + ($index < $remainder ? 1 : 0);
+        $result[] = $cents / 100;
+    }
+
+    return $result;
+}
+
 function saveSlicePayload(array $payload): array
 {
     $cityLabel = normalizeSpaces((string) ($payload['city_label'] ?? ''));
@@ -926,6 +945,13 @@ function saveSlicePayload(array $payload): array
 
     if ($cleanRows === []) {
         throw new RuntimeException('После очистки данных не осталось строк для сохранения.');
+    }
+
+    $extraExpensesTotal = parseNumericValue($payload['extra_expenses_total'] ?? array_sum(array_column($cleanRows, 'extra_expenses')));
+    $distributedExtraExpenses = distributeExtraExpensesEvenly($extraExpensesTotal, count($cleanRows));
+
+    foreach ($cleanRows as $index => $row) {
+        $cleanRows[$index]['extra_expenses'] = $distributedExtraExpenses[$index] ?? 0.0;
     }
 
     $cityKey = transliterateForPath($cityLabel);
@@ -1364,6 +1390,11 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
             font: inherit;
         }
 
+        .summary-table input[readonly] {
+            background: #f3f7fa;
+            color: var(--muted);
+        }
+
         .summary-total td {
             font-weight: 700;
             background: rgba(13, 108, 143, 0.08);
@@ -1593,8 +1624,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
                 <section class="panel">
                     <h2>Сводка по направлениям</h2>
                     <p class="small">
-                        Нижняя таблица строится только по загруженному файлу. Можно вручную заполнить продажи, выручку и дополнительные расходы,
-                        после чего показатели пересчитаются без нового запроса и без перезагрузки страницы.
+                        Нижняя таблица строится только по загруженному файлу. Можно вручную заполнить продажи, выручку и общую сумму дополнительных расходов.
+                        Допрасходы сверху распределяются автоматически по всем строкам, после чего показатели пересчитаются без нового запроса и без перезагрузки страницы.
                     </p>
                     <div class="toolbar">
                         <button type="button" id="save-slice-button">Сохранить показания</button>
@@ -1654,7 +1685,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
                                     <td data-field="roi"></td>
                                     <td data-field="roas"></td>
                                     <td data-field="ad_spend"></td>
-                                    <td><input type="number" min="0" step="0.01" data-manual="extra_expenses" placeholder="0"></td>
+                                    <td><input type="number" min="0" step="0.01" data-manual="extra_expenses" placeholder="0" readonly></td>
                                 </tr>
                             <?php endforeach; ?>
                             <tr class="summary-total">
@@ -1672,7 +1703,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
                                 <td data-total="roi"></td>
                                 <td data-total="roas"></td>
                                 <td data-total="ad_spend"></td>
-                                <td data-total="extra_expenses"></td>
+                                <td><input type="number" min="0" step="0.01" data-manual-total="extra_expenses_total" placeholder="0"></td>
                             </tr>
                             </tbody>
                         </table>
@@ -1753,6 +1784,24 @@ document.addEventListener('DOMContentLoaded', function () {
         return formatMoney(sum / count);
     }
 
+    function distributeExtraExpenses(total, count) {
+        if (!Number.isFinite(total) || count <= 0) {
+            return [];
+        }
+
+        const totalCents = Math.round(total * 100);
+        const base = Math.floor(totalCents / count);
+        const remainder = totalCents - (base * count);
+        const values = [];
+
+        for (let index = 0; index < count; index += 1) {
+            const cents = base + (index < remainder ? 1 : 0);
+            values.push(cents / 100);
+        }
+
+        return values;
+    }
+
     function storageKey() {
         return 'avito-import-summary:' + (summaryTable.dataset.context || 'default');
     }
@@ -1774,7 +1823,10 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function collectSlicePayload() {
-        const rows = Array.from(summaryTable.querySelectorAll('tbody tr[data-direction]')).map(function (row) {
+        const tableRows = Array.from(summaryTable.querySelectorAll('tbody tr[data-direction]'));
+        const totalExtraExpenses = parseNumber(summaryTable.querySelector('[data-manual-total="extra_expenses_total"]')?.value);
+        const distributedExtraExpenses = distributeExtraExpenses(totalExtraExpenses, tableRows.length);
+        const rows = tableRows.map(function (row, index) {
             return {
                 direction: row.dataset.direction || '',
                 impressions: parseNumber(row.dataset.impressions),
@@ -1783,7 +1835,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 ad_spend: parseNumber(row.dataset.adSpend),
                 sales_count: parseNumber(row.querySelector('[data-manual="sales_count"]')?.value),
                 revenue: parseNumber(row.querySelector('[data-manual="revenue"]')?.value),
-                extra_expenses: parseNumber(row.querySelector('[data-manual="extra_expenses"]')?.value)
+                extra_expenses: distributedExtraExpenses[index] || 0
             };
         });
 
@@ -1793,6 +1845,7 @@ document.addEventListener('DOMContentLoaded', function () {
             period_to: summaryTable.dataset.periodTo || '',
             source_filename: summaryTable.dataset.sourceFilename || '',
             source_item_count: parseNumber(summaryTable.dataset.sourceItemCount || 0),
+            extra_expenses_total: totalExtraExpenses,
             summary_rows: rows
         };
     }
@@ -1800,6 +1853,8 @@ document.addEventListener('DOMContentLoaded', function () {
     function recalculate() {
         const rows = Array.from(summaryTable.querySelectorAll('tbody tr[data-direction]'));
         const manualValues = {};
+        const totalExtraExpenses = parseNumber(summaryTable.querySelector('[data-manual-total="extra_expenses_total"]')?.value);
+        const distributedExtraExpenses = distributeExtraExpenses(totalExtraExpenses, rows.length);
         const totals = {
             impressions: 0,
             views: 0,
@@ -1810,7 +1865,7 @@ document.addEventListener('DOMContentLoaded', function () {
             extra_expenses: 0
         };
 
-        rows.forEach(function (row) {
+        rows.forEach(function (row, index) {
             const direction = row.dataset.direction || '';
             const impressions = parseNumber(row.dataset.impressions);
             const views = parseNumber(row.dataset.views);
@@ -1818,15 +1873,19 @@ document.addEventListener('DOMContentLoaded', function () {
             const adSpend = parseNumber(row.dataset.adSpend);
             const salesCount = parseNumber(row.querySelector('[data-manual="sales_count"]')?.value);
             const revenue = parseNumber(row.querySelector('[data-manual="revenue"]')?.value);
-            const extraExpenses = parseNumber(row.querySelector('[data-manual="extra_expenses"]')?.value);
+            const extraExpenses = distributedExtraExpenses[index] || 0;
             const totalExpenses = adSpend + extraExpenses;
             const roi = totalExpenses > 0 ? ((revenue - totalExpenses) / totalExpenses) * 100 : NaN;
             const roas = adSpend > 0 ? revenue / adSpend : NaN;
+            const extraExpensesInput = row.querySelector('[data-manual="extra_expenses"]');
+
+            if (extraExpensesInput instanceof HTMLInputElement) {
+                extraExpensesInput.value = extraExpenses > 0 ? extraExpenses.toFixed(2) : '0';
+            }
 
             manualValues[direction] = {
                 sales_count: salesCount,
-                revenue: revenue,
-                extra_expenses: extraExpenses
+                revenue: revenue
             };
 
             totals.impressions += impressions;
@@ -1843,7 +1902,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 views: formatInteger(views),
                 cr1: ratioPercent(contacts, views),
                 contacts: formatInteger(contacts),
-                cpl: unitCost(adSpend, contacts),
+                cpl: unitCost(adSpend + extraExpenses, contacts),
                 cr2: ratioPercent(salesCount, contacts),
                 cpo: unitCost(adSpend, salesCount),
                 roi: Number.isFinite(roi) ? formatPercent(roi) : 'н/д',
@@ -1859,6 +1918,10 @@ document.addEventListener('DOMContentLoaded', function () {
             });
         });
 
+        manualValues.__totals = {
+            extra_expenses_total: totalExtraExpenses
+        };
+
         saveManualValues(manualValues);
 
         const totalExpenses = totals.ad_spend + totals.extra_expenses;
@@ -1868,15 +1931,14 @@ document.addEventListener('DOMContentLoaded', function () {
             views: formatInteger(totals.views),
             cr1: ratioPercent(totals.contacts, totals.views),
             contacts: formatInteger(totals.contacts),
-            cpl: unitCost(totals.ad_spend, totals.contacts),
+            cpl: unitCost(totalExpenses, totals.contacts),
             cr2: ratioPercent(totals.sales_count, totals.contacts),
             sales_count: formatInteger(totals.sales_count),
             cpo: unitCost(totals.ad_spend, totals.sales_count),
             revenue: formatMoney(totals.revenue),
             roi: totalExpenses > 0 ? formatPercent(((totals.revenue - totalExpenses) / totalExpenses) * 100) : 'н/д',
             roas: totals.ad_spend > 0 ? formatDecimal(totals.revenue / totals.ad_spend) : 'н/д',
-            ad_spend: formatMoney(totals.ad_spend),
-            extra_expenses: formatMoney(totals.extra_expenses)
+            ad_spend: formatMoney(totals.ad_spend)
         };
 
         Object.keys(totalValues).forEach(function (field) {
@@ -1941,6 +2003,20 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     const savedValues = loadManualValues();
+    const totalExtraExpensesInput = summaryTable.querySelector('[data-manual-total="extra_expenses_total"]');
+    let initialTotalExtraExpenses = parseNumber(savedValues.__totals?.extra_expenses_total);
+
+    if (initialTotalExtraExpenses <= 0) {
+        initialTotalExtraExpenses = Array.from(summaryTable.querySelectorAll('tbody tr[data-direction]')).reduce(function (sum, row) {
+            const direction = row.dataset.direction || '';
+            const rowValues = savedValues[direction] || {};
+            return sum + parseNumber(rowValues.extra_expenses);
+        }, 0);
+    }
+
+    if (totalExtraExpensesInput instanceof HTMLInputElement && initialTotalExtraExpenses > 0) {
+        totalExtraExpensesInput.value = initialTotalExtraExpenses.toFixed(2);
+    }
 
     Array.from(summaryTable.querySelectorAll('tbody tr[data-direction]')).forEach(function (row) {
         const direction = row.dataset.direction || '';
@@ -1948,13 +2024,19 @@ document.addEventListener('DOMContentLoaded', function () {
 
         row.querySelectorAll('[data-manual]').forEach(function (input) {
             const field = input.dataset.manual || '';
-            if (Object.prototype.hasOwnProperty.call(rowValues, field)) {
+            if (field !== 'extra_expenses' && Object.prototype.hasOwnProperty.call(rowValues, field)) {
                 input.value = rowValues[field];
             }
 
-            input.addEventListener('input', recalculate);
+            if (field !== 'extra_expenses') {
+                input.addEventListener('input', recalculate);
+            }
         });
     });
+
+    if (totalExtraExpensesInput instanceof HTMLInputElement) {
+        totalExtraExpensesInput.addEventListener('input', recalculate);
+    }
 
     if (saveSliceButton) {
         saveSliceButton.addEventListener('click', saveSlice);
